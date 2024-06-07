@@ -1,19 +1,11 @@
-import utils
-
-
-
-proc decryptAES128CBC*(input, key, iv: seq[uint8]): seq[uint8]
-
-proc decrypt*(encrypted, key, iv: string): string =
-  let encrypted = cast[seq[uint8]](encrypted)
-  let key = cast[seq[uint8]](key)
-  let iv = cast[seq[uint8]](iv)
-  cast[string](decryptAES128CBC(encrypted, key, iv))
-
 # DON'T USE IN PRODUCTION
 # http://www.moserware.com/2009/09/stick-figure-guide-to-advanced.html
 # https://blog.nindalf.com/posts/implementing-aes/
 # https://github.com/CrackedPoly/AES-go
+import utils
+
+
+
 const SBOX: array[256, uint8] = [
   0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
   0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
@@ -75,8 +67,15 @@ type
 proc keyExpansion(self: AESCipher): seq[uint32]
 proc newAES(key: seq[uint8]): AESCipher =
   result.new
-  result.nk = 4
-  result.nr = 10
+  case key.len
+  of 16:
+    result.nk = 4
+    result.nr = 10
+  of 32:
+    result.nk = 8
+    result.nr = 14
+  else:
+    raise newException(ValueError, "Unsupported key len: " & $key.len)
   result.key = key
   result.roundKeys = result.keyExpansion
 
@@ -99,6 +98,8 @@ proc keyExpansion(self: AESCipher): seq[uint32] =
       t.subBytes
       var tr = fromUint32BE(RCON[i div self.nk - 1])
       t.`xor=`(tr)
+    elif self.nk > 6 and i mod self.nk == 4:
+      t.subBytes
     result.add result[i - self.nk] xor t.toUint32BE
 
 proc addRoundKey(state: var seq[uint8], w: seq[uint32]) =
@@ -114,6 +115,11 @@ proc shiftRow(b: var seq[uint8], i, n: int) =
     b[i + 4 * ((n + 2) mod 4)],
     b[i + 4 * ((n + 3) mod 4)]
   )
+
+proc shiftRows(state: var seq[uint8]) =
+  state.shiftRow(1, 1)
+  state.shiftRow(2, 2)
+  state.shiftRow(3, 3)
 
 proc invShiftRows(state: var seq[uint8]) =
   state.shiftRow(1, 3)
@@ -147,10 +153,26 @@ proc mulWord(state: var seq[uint8], i: int, s: openArray[uint8]) =
   state[i + 2] = mulByte(t[0], s[1]) xor mulByte(t[1], s[2]) xor mulByte(t[2], s[3]) xor mulByte(t[3], s[0])
   state[i + 3] = mulByte(t[0], s[0]) xor mulByte(t[1], s[1]) xor mulByte(t[2], s[2]) xor mulByte(t[3], s[3])
 
+proc mixColumns(state: var seq[uint8]) =
+  const s: array[4, uint8] = [0x03, 0x01, 0x01, 0x02]
+  for i in countup(0, state.len - 1, 4):
+    mulWord(state, i, s)
+
 proc invMixColumns(state: var seq[uint8]) =
   const s: array[4, uint8] = [0x0b, 0x0d, 0x09, 0x0e]
   for i in countup(0, state.len - 1, 4):
     mulWord(state, i, s)
+
+proc encryptBlock(self: AESCipher, state: var seq[uint8]) =
+  addRoundKey(state, self.roundKeys[0 ..< 4])
+  for r in 1 ..< self.nr:
+    subBytes(state)
+    shiftRows(state)
+    mixColumns(state)
+    addRoundKey(state, self.roundKeys[r * 4 ..< (r + 1) * 4])
+  subBytes(state)
+  shiftRows(state)
+  addRoundKey(state, self.roundKeys[self.nr * 4 ..< (self.nr + 1) * 4])
 
 proc decryptBlock(self: AESCipher, state: var seq[uint8]) =
   addRoundKey(state, self.roundKeys[self.nr * 4 ..< (self.nr + 1) * 4])
@@ -175,7 +197,8 @@ proc decryptCBC(self: AESCipher, input: var seq[uint8], iv: seq[uint8]): seq[uin
     var s = input[i ..< i + 16]
     self.decryptBlock(s)
     s.`xor=`(iv)
-    for j in 0 ..< 16: input[i + j] = s[j]
+    # for j in 0 ..< 16: input[i + j] = s[j]
+    copyMem(addr(input[i]), addr(s[0]), 16)
     iv = reg
   input.unpadPKCS7
 
@@ -185,3 +208,30 @@ proc decryptAES128CBC*(input, key, iv: seq[uint8]): seq[uint8] =
   let cipher = newAES(key)
   var input = input
   cipher.decryptCBC(input, iv)
+
+proc inc32(x: var seq[uint8]): seq[uint8] =
+  let lsb32 = x.toUint32BE(x.len - 4) + 1
+  x.fromUint32BE(lsb32, x.len - 4)
+  x
+
+proc encryptGCTR(self: AESCipher, input: var seq[uint8], icb: seq[uint8]): seq[uint8] =
+  var xorBlock = newSeq[uint8]((input.len + 15) div 16 * 16)
+  var cbi = icb
+  var cbi1 = icb
+  for i in countup(0, input.len - 1, 16):
+    self.encryptBlock(cbi1)
+    copyMem(addr(xorBlock[i]), addr(cbi1[0]), 16)
+    cbi = inc32(cbi)
+    cbi1 = cbi
+  (input xor xorBlock)[0 ..< ^16]
+
+proc decryptGCM(self: AESCipher, input: var seq[uint8], iv: seq[uint8]): seq[uint8] =
+  var J0 = iv & @[0'u8, 0, 0, 1]
+  self.encryptGCTR(input, inc32(J0))
+
+proc decryptAES256GCM*(input, key, iv: seq[uint8]): seq[uint8] =
+  doAssert key.len == 32
+  doAssert iv.len == 12
+  let cipher = newAES(key)
+  var input = input
+  cipher.decryptGCM(input, iv)

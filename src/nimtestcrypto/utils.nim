@@ -13,6 +13,11 @@ proc strxor*(a, b: string): string =
     a[i] = a[i] xor b[i]
   cast[string](a)
 
+proc `xor`*(a, b: seq[uint8]): seq[uint8] =
+  result = newSeq[uint8](a.len)
+  for i, x in a:
+    result[i] = x xor b[i]
+
 proc writeInt32BE*(n: int): string =
   var n = n.int32
   var r: int32
@@ -22,6 +27,10 @@ proc writeInt32BE*(n: int): string =
 
 proc toHexString*(s: string): string =
   s.mapIt(it.ord.toHex(2)).join
+
+proc fromHexString*(s: string): string =
+  for i in countup(0, s.len - 1, 2):
+    result &= fromHex[uint8](s[i ..< i + 2]).char
 
 proc toUint32BE*(bytes: var seq[uint8], offset = 0): uint32 {.inline.} =
   (
