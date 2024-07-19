@@ -185,6 +185,11 @@ proc decryptBlock(self: AESCipher, state: var seq[uint8]) =
   invSubBytes(state)
   addRoundKey(state, self.roundKeys[0 ..< 4])
 
+proc padPKCS7(input: var seq[uint8], blockLen: int): seq[uint8] =
+  result = input
+  let r = blockLen - input.len mod blockLen
+  for _ in 0 ..< r: result.add r.uint8
+
 proc unpadPKCS7(input: var seq[uint8]): seq[uint8] =
   let last = input[^1].int
   input[0 ..< ^last]
@@ -197,7 +202,6 @@ proc decryptCBC(self: AESCipher, input: var seq[uint8], iv: seq[uint8]): seq[uin
     var s = input[i ..< i + 16]
     self.decryptBlock(s)
     s.`xor=`(iv)
-    # for j in 0 ..< 16: input[i + j] = s[j]
     copyMem(addr(input[i]), addr(s[0]), 16)
     iv = reg
   input.unpadPKCS7
@@ -235,3 +239,16 @@ proc decryptAES256GCM*(input, key, iv: seq[uint8]): seq[uint8] =
   let cipher = newAES(key)
   var input = input
   cipher.decryptGCM(input, iv)
+
+proc encryptECB(self: AESCipher, input: var seq[uint8]): seq[uint8] =
+  result = input.padPKCS7(16)
+  for i in countup(0, result.len - 1, 16):
+    var b = result[i ..< i + 16]
+    self.encryptBlock(b)
+    copyMem(result[i].addr, b[0].addr, 16)
+
+proc encryptAES128ECB*(input, key: seq[uint8]): seq[uint8] =
+  doAssert key.len == 16
+  let cipher = newAES(key)
+  var input = input
+  cipher.encryptECB(input)
